@@ -3,26 +3,81 @@
 // 2. In-memory index is the source of truth for reads
 // 3. On startup, index is rebuilt from WAL
 
-use std::path::PathBuf;
+// Compaction invariant:
+// - No writes during compaction
+// - Old WAL remains untouched until new WAL is fully written
+// - WAL swap is atomic
+// - Index is rebuilt from compacted WAL
+
+use std::fs::rename;
+use std::{fs::OpenOptions, io::Write, path::PathBuf};
+
+use super::index::Index;
+use super::wal::Wal;
 
 pub struct KvStore {
-    
+    wal: Wal,
+    index: Index,
+    path: PathBuf,
 }
 
 impl KvStore {
     pub fn open(path: PathBuf) -> Self {
-        todo!()
+        let wal = Wal::open(&path);
+        let index = Wal::replay(&path);
+
+        Self { wal, index, path }
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        todo!()
+        self.wal.append_put(&key, &value);
+        self.wal.flush();
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        todo!()
+    pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        let ptr = self.index.get(key)?;
+        Some(self.wal.read_val(ptr.offset, ptr.value_len))
     }
 
-    pub fn delete(&self, key: &[u8]) {
-        todo!()
+    pub fn delete(&mut self, key: &[u8]) {
+        self.wal.append_del(&key);
+        self.wal.flush();
+
+        self.index.remove(key);
+    }
+
+    pub fn compact(&mut self) {
+        println!("inside compact() call");
+        let compact_path = self.path.join("wal.compact");
+
+        let mut compact_wal = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&compact_path)
+            .unwrap();
+
+        for (key, ptr) in self.index.iter() {
+            let value = self.wal.read_val(ptr.offset, ptr.value_len);
+
+            compact_wal.write_all(&[1]).unwrap();
+            compact_wal
+                .write_all(&(key.len() as u32).to_le_bytes())
+                .unwrap();
+            compact_wal
+                .write_all(&(value.len() as u32).to_le_bytes())
+                .unwrap();
+            compact_wal.write_all(key).unwrap();
+            compact_wal.write_all(&value).unwrap();
+        }
+
+        compact_wal.flush().unwrap();
+
+        let wal_path = self.path.join("wal.log");
+        drop(&mut self.wal);
+        rename(&compact_path, &wal_path).unwrap();
+
+        self.index = Wal::replay(&self.path);
+        self.wal = Wal::open(&self.path);
     }
 }
