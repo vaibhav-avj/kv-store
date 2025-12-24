@@ -16,32 +16,37 @@ use super::index::Index;
 use super::wal::Wal;
 
 pub struct KvStore {
-    wal: Wal,
+    wal: Option<Wal>,
     index: Index,
     path: PathBuf,
 }
 
 impl KvStore {
     pub fn open(path: PathBuf) -> Self {
-        let wal = Wal::open(&path);
+        let wal = Some(Wal::open(&path));
         let index = Wal::replay(&path);
 
         Self { wal, index, path }
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        self.wal.append_put(&key, &value);
-        self.wal.flush();
+        self.wal.as_mut().unwrap().append_put(&key, &value);
+        self.wal.as_mut().unwrap().flush();
     }
 
     pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         let ptr = self.index.get(key)?;
-        Some(self.wal.read_val(ptr.offset, ptr.value_len))
+        Some(
+            self.wal
+                .as_mut()
+                .unwrap()
+                .read_val(ptr.offset, ptr.value_len),
+        )
     }
 
     pub fn delete(&mut self, key: &[u8]) {
-        self.wal.append_del(&key);
-        self.wal.flush();
+        self.wal.as_mut().unwrap().append_del(key);
+        self.wal.as_mut().unwrap().flush();
 
         self.index.remove(key);
     }
@@ -58,7 +63,11 @@ impl KvStore {
             .unwrap();
 
         for (key, ptr) in self.index.iter() {
-            let value = self.wal.read_val(ptr.offset, ptr.value_len);
+            let value = self
+                .wal
+                .as_mut()
+                .unwrap()
+                .read_val(ptr.offset, ptr.value_len);
 
             compact_wal.write_all(&[1]).unwrap();
             compact_wal
@@ -74,10 +83,12 @@ impl KvStore {
         compact_wal.flush().unwrap();
 
         let wal_path = self.path.join("wal.log");
-        drop(&mut self.wal);
+        let old = self.wal.take();
+        drop(old);
+
         rename(&compact_path, &wal_path).unwrap();
 
         self.index = Wal::replay(&self.path);
-        self.wal = Wal::open(&self.path);
+        self.wal = Some(Wal::open(&self.path));
     }
 }

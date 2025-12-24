@@ -126,8 +126,7 @@ impl Wal {
                 _ => panic!("Unknown record type"),
             }
         }
-
-        return index;
+        index
     }
 
     pub fn read_val(&mut self, offset: u64, len: u32) -> Vec<u8> {
